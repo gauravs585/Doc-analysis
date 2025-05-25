@@ -6,13 +6,8 @@ import streamlit as st
 from pathlib import Path
 import PyPDF2
 from docx import Document
-import openai
-from transformers import pipeline
 import plotly.express as px
 import plotly.graph_objects as go
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
-import seaborn as sns
 from textstat import flesch_reading_ease, flesch_kincaid_grade
 import nltk
 from nltk.corpus import stopwords
@@ -20,13 +15,16 @@ from nltk.tokenize import word_tokenize, sent_tokenize
 from collections import Counter
 import re
 from datetime import datetime
+import requests
+import time
 
 # Download required NLTK data
+@st.cache_resource
 def download_nltk_data():
     """Download required NLTK data with error handling"""
     required_data = [
         ('tokenizers/punkt', 'punkt'),
-        ('tokenizers/punkt_tab', 'punkt_tab'),
+        ('tokenizers/punkt_tab', 'punkt_tab'), 
         ('corpora/stopwords', 'stopwords')
     ]
     
@@ -45,44 +43,109 @@ download_nltk_data()
 
 class DocumentAnalyzer:
     """
-    A comprehensive document analysis tool using various LLMs and NLP techniques
+    A comprehensive document analysis tool with improved error handling
     """
     
     def __init__(self, openai_api_key: Optional[str] = None):
         """Initialize the document analyzer with optional OpenAI API key"""
         self.openai_api_key = openai_api_key
-        if openai_api_key:
-            openai.api_key = openai_api_key
         
-        # Initialize local models
+        # Initialize models with better error handling
         self.sentiment_analyzer = None
         self.summarizer = None
         self.classifier = None
+        self.models_loaded = False
         self._load_models()
         
-    def _load_models(self):
-        """Load pre-trained models for analysis"""
+    @st.cache_resource
+    def _load_models(_self):
+        """Load pre-trained models for analysis with improved error handling"""
+        models_status = {
+            'sentiment': False,
+            'summarizer': False,
+            'classifier': False
+        }
+        
         try:
-            # Sentiment analysis model
-            self.sentiment_analyzer = pipeline(
-                "sentiment-analysis",
-                model="cardiffnlp/twitter-roberta-base-sentiment-latest"
-            )
+            # Try loading models with better error handling
+            from transformers import pipeline
+            import torch
+            
+            # Set device to CPU to avoid CUDA issues
+            device = "cpu"
+            
+            # Sentiment analysis model - try multiple options
+            try:
+                _self.sentiment_analyzer = pipeline(
+                    "sentiment-analysis",
+                    model="cardiffnlp/twitter-roberta-base-sentiment-latest",
+                    device=device,
+                    return_all_scores=True
+                )
+                models_status['sentiment'] = True
+            except Exception as e:
+                print(f"Failed to load sentiment model: {e}")
+                try:
+                    # Fallback to a simpler model
+                    _self.sentiment_analyzer = pipeline(
+                        "sentiment-analysis",
+                        model="distilbert-base-uncased-finetuned-sst-2-english",
+                        device=device
+                    )
+                    models_status['sentiment'] = True
+                except Exception as e2:
+                    print(f"Failed to load fallback sentiment model: {e2}")
             
             # Text summarization model
-            self.summarizer = pipeline(
-                "summarization",
-                model="facebook/bart-large-cnn"
-            )
+            try:
+                _self.summarizer = pipeline(
+                    "summarization",
+                    model="facebook/bart-large-cnn",
+                    device=device
+                )
+                models_status['summarizer'] = True
+            except Exception as e:
+                print(f"Failed to load summarization model: {e}")
+                try:
+                    # Fallback to smaller model
+                    _self.summarizer = pipeline(
+                        "summarization",
+                        model="sshleifer/distilbart-cnn-12-6",
+                        device=device
+                    )
+                    models_status['summarizer'] = True
+                except Exception as e2:
+                    print(f"Failed to load fallback summarization model: {e2}")
             
             # Text classification model
-            self.classifier = pipeline(
-                "zero-shot-classification",
-                model="facebook/bart-large-mnli"
-            )
+            try:
+                _self.classifier = pipeline(
+                    "zero-shot-classification",
+                    model="facebook/bart-large-mnli",
+                    device=device
+                )
+                models_status['classifier'] = True
+            except Exception as e:
+                print(f"Failed to load classification model: {e}")
+                try:
+                    # Fallback to smaller model
+                    _self.classifier = pipeline(
+                        "zero-shot-classification",
+                        model="typeform/distilbert-base-uncased-mnli",
+                        device=device
+                    )
+                    models_status['classifier'] = True
+                except Exception as e2:
+                    print(f"Failed to load fallback classification model: {e2}")
             
+        except ImportError as e:
+            st.error(f"Error importing transformers: {e}. Some features may not be available.")
         except Exception as e:
             st.error(f"Error loading models: {e}")
+        
+        _self.models_status = models_status
+        _self.models_loaded = any(models_status.values())
+        return models_status
     
     def extract_text_from_pdf(self, pdf_file) -> str:
         """Extract text from PDF file"""
@@ -152,58 +215,163 @@ class DocumentAnalyzer:
                 readability_ease = 0
                 readability_grade = 0
             
+            # Character frequency analysis
+            char_freq = Counter(text.lower().replace(' ', ''))
+            most_common_chars = char_freq.most_common(5)
+            
+            # Average word length
+            avg_word_length = sum(len(word) for word in words) / len(words) if words else 0
+            
             return {
                 'word_count': len(words),
                 'sentence_count': len(sentences),
                 'character_count': len(text),
                 'unique_words': len(set(words)),
                 'avg_words_per_sentence': len(words) / len(sentences) if sentences else 0,
+                'avg_word_length': round(avg_word_length, 2),
                 'most_common_words': word_freq.most_common(10),
-                'readability_ease': readability_ease,
-                'readability_grade': readability_grade
+                'most_common_chars': most_common_chars,
+                'readability_ease': round(readability_ease, 2) if isinstance(readability_ease, (int, float)) else 0,
+                'readability_grade': round(readability_grade, 2) if isinstance(readability_grade, (int, float)) else 0,
+                'lexical_diversity': len(set(words)) / len(words) if words else 0
             }
         except Exception as e:
             return {"error": f"Basic analysis failed: {e}"}
     
+    def analyze_sentiment_fallback(self, text: str) -> Dict[str, Any]:
+        """Fallback sentiment analysis using simple word matching"""
+        try:
+            # Simple sentiment lexicon
+            positive_words = set(['good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 
+                                'happy', 'joy', 'love', 'like', 'best', 'perfect', 'awesome',
+                                'brilliant', 'outstanding', 'superb', 'magnificent', 'marvelous'])
+            
+            negative_words = set(['bad', 'terrible', 'awful', 'horrible', 'hate', 'dislike', 'worst',
+                                'terrible', 'disgusting', 'pathetic', 'useless', 'disappointing',
+                                'sad', 'angry', 'frustrated', 'annoying', 'stupid', 'ridiculous'])
+            
+            words = re.findall(r'\b\w+\b', text.lower())
+            
+            positive_count = sum(1 for word in words if word in positive_words)
+            negative_count = sum(1 for word in words if word in negative_words)
+            total_sentiment_words = positive_count + negative_count
+            
+            if total_sentiment_words == 0:
+                sentiment = 'neutral'
+                confidence = 0.5
+            elif positive_count > negative_count:
+                sentiment = 'positive'
+                confidence = positive_count / total_sentiment_words
+            elif negative_count > positive_count:
+                sentiment = 'negative'
+                confidence = negative_count / total_sentiment_words
+            else:
+                sentiment = 'neutral'
+                confidence = 0.5
+            
+            return {
+                'overall_sentiment': sentiment,
+                'sentiment_distribution': {
+                    'positive': positive_count,
+                    'negative': negative_count,
+                    'neutral': len(words) - total_sentiment_words
+                },
+                'confidence_score': round(confidence, 2),
+                'method': 'fallback_lexicon'
+            }
+        except Exception as e:
+            return {"error": f"Fallback sentiment analysis failed: {e}"}
+    
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """Analyze sentiment of the text"""
         if not self.sentiment_analyzer:
-            return {"error": "Sentiment analyzer not available"}
+            st.warning("Using fallback sentiment analysis method")
+            return self.analyze_sentiment_fallback(text)
         
         try:
             # Split text into chunks for analysis
-            chunks = [text[i:i+500] for i in range(0, len(text), 500)]
+            max_length = 512  # Most models have this limit
+            chunks = [text[i:i+max_length] for i in range(0, len(text), max_length)]
             sentiments = []
             
-            for chunk in chunks[:10]:  # Limit to first 10 chunks
-                result = self.sentiment_analyzer(chunk)
-                sentiments.append(result[0])
+            for chunk in chunks[:5]:  # Limit to first 5 chunks to avoid timeout
+                if len(chunk.strip()) > 10:  # Only analyze meaningful chunks
+                    result = self.sentiment_analyzer(chunk)
+                    if isinstance(result, list) and len(result) > 0:
+                        if isinstance(result[0], list):
+                            # Handle return_all_scores=True format
+                            sentiments.extend(result[0])
+                        else:
+                            sentiments.append(result[0])
             
-            # Aggregate results
-            labels = [s['label'] for s in sentiments]
-            scores = [s['score'] for s in sentiments]
+            if not sentiments:
+                return self.analyze_sentiment_fallback(text)
+            
+            # Process results
+            if 'score' in sentiments[0]:
+                # Standard format
+                labels = [s['label'] for s in sentiments]
+                scores = [s['score'] for s in sentiments]
+            else:
+                # Alternative format
+                labels = [s.get('label', 'unknown') for s in sentiments]
+                scores = [s.get('score', 0.5) for s in sentiments]
             
             # Map labels to standard format
-            label_mapping = {'LABEL_0': 'negative', 'LABEL_1': 'neutral', 'LABEL_2': 'positive'}
-            mapped_labels = [label_mapping.get(label, label.lower()) for label in labels]
+            label_mapping = {
+                'LABEL_0': 'negative', 'LABEL_1': 'neutral', 'LABEL_2': 'positive',
+                'NEGATIVE': 'negative', 'POSITIVE': 'positive', 'NEUTRAL': 'neutral'
+            }
+            mapped_labels = [label_mapping.get(label.upper(), label.lower()) for label in labels]
             
             sentiment_counts = Counter(mapped_labels)
-            avg_score = sum(scores) / len(scores) if scores else 0
+            avg_score = sum(scores) / len(scores) if scores else 0.5
             
             return {
                 'overall_sentiment': max(sentiment_counts, key=sentiment_counts.get),
                 'sentiment_distribution': dict(sentiment_counts),
-                'confidence_score': avg_score,
-                'detailed_analysis': list(zip(mapped_labels, scores))
+                'confidence_score': round(avg_score, 2),
+                'detailed_analysis': list(zip(mapped_labels, scores)),
+                'method': 'transformer_model'
             }
             
         except Exception as e:
-            return {"error": f"Sentiment analysis failed: {e}"}
+            st.warning(f"Model-based sentiment analysis failed, using fallback: {e}")
+            return self.analyze_sentiment_fallback(text)
+    
+    def summarize_text_fallback(self, text: str, max_sentences: int = 3) -> Dict[str, Any]:
+        """Fallback text summarization using extractive method"""
+        try:
+            sentences = sent_tokenize(text)
+            if len(sentences) <= max_sentences:
+                return {
+                    'summary': text,
+                    'original_length': len(text),
+                    'summary_length': len(text),
+                    'compression_ratio': 1.0,
+                    'method': 'no_compression_needed'
+                }
+            
+            # Simple extractive summarization - take first, middle, and last sentences
+            indices = [0, len(sentences)//2, len(sentences)-1]
+            summary_sentences = [sentences[i] for i in indices if i < len(sentences)]
+            summary = ' '.join(summary_sentences)
+            
+            return {
+                'summary': summary,
+                'original_length': len(text),
+                'summary_length': len(summary),
+                'compression_ratio': len(summary) / len(text),
+                'method': 'extractive_fallback'
+            }
+        except Exception as e:
+            return {"error": f"Fallback summarization failed: {e}"}
     
     def summarize_text(self, text: str, max_length: int = 150) -> Dict[str, Any]:
         """Generate text summary"""
         if not self.summarizer:
-            return {"error": "Summarizer not available"}
+            st.warning("Using fallback summarization method")
+            return self.summarize_text_fallback(text)
         
         try:
             # Truncate text if too long
@@ -211,22 +379,77 @@ class DocumentAnalyzer:
             if len(text) > max_input_length:
                 text = text[:max_input_length]
             
+            # Ensure minimum length for summarization
+            if len(text) < 100:
+                return {
+                    'summary': text,
+                    'original_length': len(text),
+                    'summary_length': len(text),
+                    'compression_ratio': 1.0,
+                    'method': 'too_short_to_summarize'
+                }
+            
             summary = self.summarizer(text, max_length=max_length, min_length=30, do_sample=False)
             
             return {
                 'summary': summary[0]['summary_text'],
                 'original_length': len(text),
                 'summary_length': len(summary[0]['summary_text']),
-                'compression_ratio': len(summary[0]['summary_text']) / len(text)
+                'compression_ratio': len(summary[0]['summary_text']) / len(text),
+                'method': 'transformer_model'
             }
             
         except Exception as e:
-            return {"error": f"Summarization failed: {e}"}
+            st.warning(f"Model-based summarization failed, using fallback: {e}")
+            return self.summarize_text_fallback(text)
+    
+    def classify_document_fallback(self, text: str, candidate_labels: List[str]) -> Dict[str, Any]:
+        """Fallback document classification using keyword matching"""
+        try:
+            # Simple keyword-based classification
+            keywords = {
+                'business': ['business', 'company', 'market', 'profit', 'revenue', 'sales', 'customer', 'strategy'],
+                'legal': ['law', 'legal', 'court', 'contract', 'agreement', 'clause', 'liability', 'terms'],
+                'academic': ['research', 'study', 'analysis', 'methodology', 'results', 'conclusion', 'hypothesis'],
+                'technical': ['system', 'software', 'algorithm', 'data', 'technical', 'implementation', 'code'],
+                'medical': ['patient', 'treatment', 'medical', 'health', 'diagnosis', 'therapy', 'clinical'],
+                'news': ['news', 'report', 'today', 'yesterday', 'breaking', 'update', 'announced'],
+                'personal': ['I', 'me', 'my', 'personal', 'diary', 'letter', 'email', 'friend']
+            }
+            
+            text_lower = text.lower()
+            scores = {}
+            
+            for label in candidate_labels:
+                if label.lower() in keywords:
+                    keyword_count = sum(1 for keyword in keywords[label.lower()] if keyword.lower() in text_lower)
+                    scores[label] = keyword_count / len(keywords[label.lower()])
+                else:
+                    # Generic scoring for unknown categories
+                    scores[label] = text_lower.count(label.lower()) / len(text_lower.split())
+            
+            if not scores or all(score == 0 for score in scores.values()):
+                # Default classification
+                predicted_category = candidate_labels[0] if candidate_labels else 'unknown'
+                scores = {label: 1/len(candidate_labels) for label in candidate_labels}
+            else:
+                predicted_category = max(scores, key=scores.get)
+            
+            return {
+                'predicted_category': predicted_category,
+                'confidence_scores': scores,
+                'all_predictions': sorted(scores.items(), key=lambda x: x[1], reverse=True),
+                'method': 'keyword_fallback'
+            }
+            
+        except Exception as e:
+            return {"error": f"Fallback classification failed: {e}"}
     
     def classify_document(self, text: str, candidate_labels: List[str]) -> Dict[str, Any]:
         """Classify document into categories"""
         if not self.classifier:
-            return {"error": "Classifier not available"}
+            st.warning("Using fallback classification method")
+            return self.classify_document_fallback(text, candidate_labels)
         
         try:
             # Truncate text if too long
@@ -239,11 +462,13 @@ class DocumentAnalyzer:
             return {
                 'predicted_category': result['labels'][0],
                 'confidence_scores': dict(zip(result['labels'], result['scores'])),
-                'all_predictions': list(zip(result['labels'], result['scores']))
+                'all_predictions': list(zip(result['labels'], result['scores'])),
+                'method': 'transformer_model'
             }
             
         except Exception as e:
-            return {"error": f"Classification failed: {e}"}
+            st.warning(f"Model-based classification failed, using fallback: {e}")
+            return self.classify_document_fallback(text, candidate_labels)
     
     def analyze_with_openai(self, text: str, analysis_type: str = "general") -> Dict[str, Any]:
         """Analyze text using OpenAI GPT"""
@@ -251,8 +476,8 @@ class DocumentAnalyzer:
             return {"error": "OpenAI API key not provided"}
         
         try:
-            from openai import OpenAI
-            client = OpenAI(api_key=self.openai_api_key)
+            import openai
+            client = openai.OpenAI(api_key=self.openai_api_key)
             
             prompts = {
                 "general": f"Analyze the following document and provide insights about its content, tone, and key themes:\n\n{text[:2000]}",
@@ -289,30 +514,50 @@ class DocumentAnalyzer:
         try:
             # Word frequency chart
             if 'basic_analysis' in analysis_results and 'most_common_words' in analysis_results['basic_analysis']:
-                words, counts = zip(*analysis_results['basic_analysis']['most_common_words'])
-                fig_words = px.bar(x=list(counts), y=list(words), orientation='h',
-                                 title="Most Common Words", labels={'x': 'Frequency', 'y': 'Words'})
-                visualizations['word_frequency'] = fig_words
+                words_data = analysis_results['basic_analysis']['most_common_words']
+                if words_data:
+                    words, counts = zip(*words_data)
+                    fig_words = px.bar(x=list(counts), y=list(words), orientation='h',
+                                     title="Most Common Words", labels={'x': 'Frequency', 'y': 'Words'})
+                    fig_words.update_layout(height=400)
+                    visualizations['word_frequency'] = fig_words
             
             # Sentiment distribution
             if 'sentiment_analysis' in analysis_results and 'sentiment_distribution' in analysis_results['sentiment_analysis']:
                 sentiment_data = analysis_results['sentiment_analysis']['sentiment_distribution']
-                fig_sentiment = px.pie(values=list(sentiment_data.values()), 
-                                     names=list(sentiment_data.keys()),
-                                     title="Sentiment Distribution")
-                visualizations['sentiment_pie'] = fig_sentiment
+                if sentiment_data:
+                    fig_sentiment = px.pie(values=list(sentiment_data.values()), 
+                                         names=list(sentiment_data.keys()),
+                                         title="Sentiment Distribution")
+                    visualizations['sentiment_pie'] = fig_sentiment
             
             # Text statistics
             if 'basic_analysis' in analysis_results:
                 stats = analysis_results['basic_analysis']
-                fig_stats = go.Figure(data=[
-                    go.Bar(x=['Words', 'Sentences', 'Unique Words'], 
-                          y=[stats.get('word_count', 0), 
-                             stats.get('sentence_count', 0), 
-                             stats.get('unique_words', 0)])
-                ])
-                fig_stats.update_layout(title="Document Statistics")
+                metrics = ['Words', 'Sentences', 'Unique Words', 'Characters']
+                values = [
+                    stats.get('word_count', 0), 
+                    stats.get('sentence_count', 0), 
+                    stats.get('unique_words', 0),
+                    stats.get('character_count', 0)
+                ]
+                
+                fig_stats = go.Figure(data=[go.Bar(x=metrics, y=values)])
+                fig_stats.update_layout(title="Document Statistics", height=400)
                 visualizations['document_stats'] = fig_stats
+            
+            # Classification confidence (if available)
+            if 'classification' in analysis_results and 'confidence_scores' in analysis_results['classification']:
+                conf_data = analysis_results['classification']['confidence_scores']
+                if conf_data:
+                    categories = list(conf_data.keys())
+                    confidences = list(conf_data.values())
+                    
+                    fig_conf = px.bar(x=categories, y=confidences,
+                                     title="Classification Confidence Scores",
+                                     labels={'x': 'Categories', 'y': 'Confidence'})
+                    fig_conf.update_layout(height=400)
+                    visualizations['classification_confidence'] = fig_conf
             
         except Exception as e:
             st.error(f"Error generating visualizations: {e}")
@@ -385,6 +630,16 @@ def create_streamlit_app():
     # Initialize analyzer
     analyzer = DocumentAnalyzer(openai_api_key if openai_api_key else None)
     
+    # Display model status
+    if hasattr(analyzer, 'models_status'):
+        st.sidebar.header("🤖 Model Status")
+        for model_name, status in analyzer.models_status.items():
+            icon = "✅" if status else "❌"
+            st.sidebar.write(f"{icon} {model_name.title()}")
+        
+        if not analyzer.models_loaded:
+            st.sidebar.warning("⚠️ Some models failed to load. Fallback methods will be used.")
+    
     # File upload
     st.header("📁 Upload Document")
     uploaded_file = st.file_uploader(
@@ -396,12 +651,13 @@ def create_streamlit_app():
     if uploaded_file is not None:
         # Extract text based on file type
         try:
-            if uploaded_file.type == "application/pdf":
-                text = analyzer.extract_text_from_pdf(uploaded_file)
-            elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                text = analyzer.extract_text_from_docx(uploaded_file)
-            else:
-                text = analyzer.extract_text_from_txt(uploaded_file)
+            with st.spinner("Extracting text from document..."):
+                if uploaded_file.type == "application/pdf":
+                    text = analyzer.extract_text_from_pdf(uploaded_file)
+                elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                    text = analyzer.extract_text_from_docx(uploaded_file)
+                else:
+                    text = analyzer.extract_text_from_txt(uploaded_file)
             
             if text.strip():
                 # Store extracted text in session state
@@ -448,240 +704,308 @@ def create_streamlit_app():
                     )
                 
                 # Run analysis button
+                run_analysis = st.button
+                # Run analysis button
                 run_analysis = st.button("🚀 Run Analysis", type="primary", key="run_analysis_btn")
                 
-                # Run analysis only when button is clicked
-                if run_analysis and not st.session_state.analysis_complete:
-                    analysis_results = {}
+                if run_analysis:
+                    st.session_state.analysis_results = {}
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
                     
-                    with st.spinner("Analyzing document..."):
-                        # Basic analysis
-                        if basic_analysis:
-                            with st.status("Running basic text analysis..."):
-                                analysis_results['basic_analysis'] = analyzer.basic_text_analysis(text)
-                        
-                        # Sentiment analysis
-                        if sentiment_analysis:
-                            with st.status("Analyzing sentiment..."):
-                                analysis_results['sentiment_analysis'] = analyzer.analyze_sentiment(text)
-                        
-                        # Text summarization
-                        if text_summarization:
-                            with st.status("Generating summary..."):
-                                analysis_results['summary'] = analyzer.summarize_text(text)
-                        
-                        # Document classification
-                        if document_classification and categories:
-                            with st.status("Classifying document..."):
-                                analysis_results['classification'] = analyzer.classify_document(text, categories)
-                        
-                        # OpenAI analysis
-                        if openai_analysis and openai_api_key:
-                            with st.status("Running OpenAI analysis..."):
-                                analysis_results['openai_analysis'] = analyzer.analyze_with_openai(text, analysis_type)
+                    analyses_to_run = []
+                    if basic_analysis:
+                        analyses_to_run.append("basic")
+                    if sentiment_analysis:
+                        analyses_to_run.append("sentiment")
+                    if text_summarization:
+                        analyses_to_run.append("summarization")
+                    if document_classification:
+                        analyses_to_run.append("classification")
+                    if openai_analysis and openai_api_key:
+                        analyses_to_run.append("openai")
                     
-                    # Store results in session state
-                    st.session_state.analysis_results = analysis_results
+                    total_analyses = len(analyses_to_run)
+                    
+                    for i, analysis in enumerate(analyses_to_run):
+                        progress = (i + 1) / total_analyses
+                        progress_bar.progress(progress)
+                        
+                        if analysis == "basic":
+                            status_text.text("Running basic text analysis...")
+                            st.session_state.analysis_results['basic_analysis'] = analyzer.basic_text_analysis(text)
+                        
+                        elif analysis == "sentiment":
+                            status_text.text("Analyzing sentiment...")
+                            st.session_state.analysis_results['sentiment_analysis'] = analyzer.analyze_sentiment(text)
+                        
+                        elif analysis == "summarization":
+                            status_text.text("Generating summary...")
+                            st.session_state.analysis_results['text_summary'] = analyzer.summarize_text(text)
+                        
+                        elif analysis == "classification":
+                            status_text.text("Classifying document...")
+                            if categories:
+                                st.session_state.analysis_results['classification'] = analyzer.classify_document(text, categories)
+                        
+                        elif analysis == "openai":
+                            status_text.text("Running OpenAI analysis...")
+                            st.session_state.analysis_results['openai_analysis'] = analyzer.analyze_with_openai(text, analysis_type)
+                    
+                    status_text.text("Analysis complete!")
                     st.session_state.analysis_complete = True
-                
-                # Display results if analysis is complete
-                if st.session_state.analysis_complete and st.session_state.analysis_results:
-                    analysis_results = st.session_state.analysis_results
-                    
-                    # Display results
-                    st.header("📊 Analysis Results")
-                    
-                    # Basic Analysis
-                    if 'basic_analysis' in analysis_results and 'error' not in analysis_results['basic_analysis']:
-                        st.subheader("📈 Basic Text Statistics")
-                        basic = analysis_results['basic_analysis']
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Word Count", basic['word_count'])
-                        with col2:
-                            st.metric("Sentences", basic['sentence_count'])
-                        with col3:
-                            st.metric("Unique Words", basic['unique_words'])
-                        with col4:
-                            st.metric("Readability Score", f"{basic['readability_ease']:.1f}" if isinstance(basic['readability_ease'], (int, float)) else "N/A")
-                    
-                    # Sentiment Analysis
-                    if 'sentiment_analysis' in analysis_results and 'error' not in analysis_results['sentiment_analysis']:
-                        st.subheader("😊 Sentiment Analysis")
-                        sentiment = analysis_results['sentiment_analysis']
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric("Overall Sentiment", sentiment['overall_sentiment'].title())
-                            st.metric("Confidence", f"{sentiment['confidence_score']:.2f}")
-                        with col2:
-                            if 'sentiment_distribution' in sentiment:
-                                st.write("**Sentiment Distribution:**")
-                                for emotion, count in sentiment['sentiment_distribution'].items():
-                                    st.write(f"- {emotion.title()}: {count}")
-                    
-                    # Summary
-                    if 'summary' in analysis_results and 'error' not in analysis_results['summary']:
-                        st.subheader("📋 Document Summary")
-                        summary = analysis_results['summary']
-                        st.write(summary['summary'])
-                        st.caption(f"Compression ratio: {summary['compression_ratio']:.2%}")
-                    
-                    # Classification
-                    if 'classification' in analysis_results and 'error' not in analysis_results['classification']:
-                        st.subheader("🏷️ Document Classification")
-                        classification = analysis_results['classification']
-                        st.write(f"**Predicted Category:** {classification['predicted_category']}")
-                        
-                        st.write("**Confidence Scores:**")
-                        for category, score in classification['confidence_scores'].items():
-                            st.write(f"- {category}: {score:.2%}")
-                    
-                    # OpenAI Analysis
-                    if 'openai_analysis' in analysis_results and 'error' not in analysis_results['openai_analysis']:
-                        st.subheader("🤖 AI-Powered Analysis")
-                        openai_result = analysis_results['openai_analysis']
-                        st.write(openai_result['analysis'])
-                    
-                    # Visualizations
-                    if generate_visualizations:
-                        st.header("📊 Visualizations")
-                        visualizations = analyzer.generate_visualizations(analysis_results)
-                        
-                        for viz_name, fig in visualizations.items():
-                            st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Export results section
-                    st.header("💾 Export Results")
-                    
-                    # Export configuration
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        export_format = st.selectbox("Export Format", ["JSON", "CSV (Basic Stats)", "TXT (Summary)"], key="export_format_select")
-                    with col2:
-                        custom_filename = st.text_input("Custom Filename (optional)", placeholder="my_analysis", key="custom_filename_input")
-                    
-                    # Show current export directory
-                    current_dir = os.getcwd()
-                    export_dir = os.path.join(current_dir, "exports")
-                    st.info(f"📁 **Export Location**: `{export_dir}`")
-                    
-                    # Export button
-                    if st.button("📊 Export Analysis Results", key="export_btn"):
-                        try:
-                            if export_format == "JSON":
-                                filename = custom_filename + ".json" if custom_filename else None
-                                full_path = analyzer.export_results(analysis_results, filename)
-                                st.success(f"✅ Results exported successfully!")
-                                st.write(f"**File saved to**: `{full_path}`")
-                                
-                                # Provide download button
-                                with open(full_path, 'r', encoding='utf-8') as f:
-                                    json_data = f.read()
-                                
-                                st.download_button(
-                                    label="⬇️ Download JSON File",
-                                    data=json_data,
-                                    file_name=os.path.basename(full_path),
-                                    mime="application/json",
-                                    key="download_json_btn"
-                                )
-                            
-                            elif export_format == "CSV (Basic Stats)":
-                                # Export basic stats as CSV
-                                if 'basic_analysis' in analysis_results:
-                                    basic_stats = analysis_results['basic_analysis']
-                                    df = pd.DataFrame([basic_stats])
-                                    
-                                    filename = custom_filename + ".csv" if custom_filename else f"basic_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                                    full_path = os.path.join(export_dir, filename)
-                                    os.makedirs(export_dir, exist_ok=True)
-                                    
-                                    df.to_csv(full_path, index=False)
-                                    st.success(f"✅ CSV exported to: `{full_path}`")
-                                    
-                                    st.download_button(
-                                        label="⬇️ Download CSV File",
-                                        data=df.to_csv(index=False),
-                                        file_name=filename,
-                                        mime="text/csv",
-                                        key="download_csv_btn"
-                                    )
-                                else:
-                                    st.error("No basic analysis data available for CSV export")
-                            
-                            elif export_format == "TXT (Summary)":
-                                # Export as readable text summary
-                                summary_text = f"Document Analysis Report\n"
-                                summary_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                                summary_text += "=" * 50 + "\n\n"
-                                
-                                for analysis_type, results in analysis_results.items():
-                                    summary_text += f"{analysis_type.upper().replace('_', ' ')}\n"
-                                    summary_text += "-" * 30 + "\n"
-                                    
-                                    if isinstance(results, dict) and 'error' not in results:
-                                        for key, value in results.items():
-                                            if isinstance(value, (str, int, float)):
-                                                summary_text += f"{key}: {value}\n"
-                                            elif isinstance(value, list) and key == 'most_common_words':
-                                                summary_text += f"Top words: {', '.join([f'{w}({c})' for w, c in value[:5]])}\n"
-                                    summary_text += "\n"
-                                
-                                filename = custom_filename + ".txt" if custom_filename else f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-                                
-                                st.download_button(
-                                    label="⬇️ Download TXT File",
-                                    data=summary_text,
-                                    file_name=filename,
-                                    mime="text/plain",
-                                    key="download_txt_btn"
-                                )
-                                
-                        except Exception as e:
-                            st.error(f"❌ Export failed: {e}")
-                    
-                    # Reset analysis button
-                    if st.button("🔄 Run New Analysis", key="reset_btn"):
-                        st.session_state.analysis_results = None
-                        st.session_state.analysis_complete = False
-                        st.rerun()
-                    
-                    # Error handling for individual analyses
-                    for analysis_name, result in analysis_results.items():
-                        if isinstance(result, dict) and 'error' in result:
-                            st.error(f"{analysis_name.title()} Error: {result['error']}")
+                    time.sleep(0.5)
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.rerun()
             
             else:
-                st.error("Could not extract text from the uploaded file.")
-                
+                st.error("No text could be extracted from the uploaded file.")
+        
         except Exception as e:
             st.error(f"Error processing file: {e}")
     
-    # Instructions
-    st.sidebar.header("📖 Instructions")
-    st.sidebar.markdown("""
-    1. Upload a PDF, DOCX, or TXT file
-    2. Configure analysis options
-    3. Add OpenAI API key for advanced analysis
-    4. Click 'Run Analysis' to start
-    5. View results and visualizations
-    6. Export results as JSON
-    """)
+    # Display results if analysis is complete
+    if st.session_state.analysis_complete and st.session_state.analysis_results:
+        st.header("📊 Analysis Results")
+        
+        # Create tabs for different analyses
+        tabs = []
+        tab_names = []
+        
+        if 'basic_analysis' in st.session_state.analysis_results:
+            tab_names.append("📈 Basic Analysis")
+        if 'sentiment_analysis' in st.session_state.analysis_results:
+            tab_names.append("😊 Sentiment")
+        if 'text_summary' in st.session_state.analysis_results:
+            tab_names.append("📝 Summary")
+        if 'classification' in st.session_state.analysis_results:
+            tab_names.append("🏷️ Classification")
+        if 'openai_analysis' in st.session_state.analysis_results:
+            tab_names.append("🤖 AI Analysis")
+        
+        if tab_names:
+            tabs = st.tabs(tab_names)
+            tab_index = 0
+            
+            # Basic Analysis Tab
+            if 'basic_analysis' in st.session_state.analysis_results:
+                with tabs[tab_index]:
+                    basic_results = st.session_state.analysis_results['basic_analysis']
+                    if 'error' not in basic_results:
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("Word Count", basic_results.get('word_count', 0))
+                            st.metric("Unique Words", basic_results.get('unique_words', 0))
+                        
+                        with col2:
+                            st.metric("Sentence Count", basic_results.get('sentence_count', 0))
+                            st.metric("Avg Words/Sentence", f"{basic_results.get('avg_words_per_sentence', 0):.1f}")
+                        
+                        with col3:
+                            st.metric("Character Count", basic_results.get('character_count', 0))
+                            st.metric("Readability Score", basic_results.get('readability_ease', 0))
+                        
+                        # Most common words
+                        if basic_results.get('most_common_words'):
+                            st.subheader("Most Common Words")
+                            words_df = pd.DataFrame(basic_results['most_common_words'], columns=['Word', 'Frequency'])
+                            st.dataframe(words_df, use_container_width=True)
+                        
+                        # Readability information
+                        st.subheader("Readability Analysis")
+                        readability_score = basic_results.get('readability_ease', 0)
+                        if readability_score >= 90:
+                            readability_level = "Very Easy"
+                        elif readability_score >= 80:
+                            readability_level = "Easy"
+                        elif readability_score >= 70:
+                            readability_level = "Fairly Easy"
+                        elif readability_score >= 60:
+                            readability_level = "Standard"
+                        elif readability_score >= 50:
+                            readability_level = "Fairly Difficult"
+                        elif readability_score >= 30:
+                            readability_level = "Difficult"
+                        else:
+                            readability_level = "Very Difficult"
+                        
+                        st.write(f"**Readability Level:** {readability_level}")
+                        st.write(f"**Grade Level:** {basic_results.get('readability_grade', 0)}")
+                        st.write(f"**Lexical Diversity:** {basic_results.get('lexical_diversity', 0):.3f}")
+                    else:
+                        st.error(f"Basic analysis failed: {basic_results['error']}")
+                tab_index += 1
+            
+            # Sentiment Analysis Tab
+            if 'sentiment_analysis' in st.session_state.analysis_results:
+                with tabs[tab_index]:
+                    sentiment_results = st.session_state.analysis_results['sentiment_analysis']
+                    if 'error' not in sentiment_results:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            overall_sentiment = sentiment_results.get('overall_sentiment', 'unknown')
+                            confidence = sentiment_results.get('confidence_score', 0)
+                            
+                            # Color code sentiment
+                            if overall_sentiment.lower() == 'positive':
+                                st.success(f"**Overall Sentiment:** {overall_sentiment.title()}")
+                            elif overall_sentiment.lower() == 'negative':
+                                st.error(f"**Overall Sentiment:** {overall_sentiment.title()}")
+                            else:
+                                st.info(f"**Overall Sentiment:** {overall_sentiment.title()}")
+                            
+                            st.metric("Confidence Score", f"{confidence:.2f}")
+                            st.write(f"**Analysis Method:** {sentiment_results.get('method', 'unknown')}")
+                        
+                        with col2:
+                            # Show sentiment distribution as text
+                            if 'sentiment_distribution' in sentiment_results:
+                                st.subheader("Sentiment Breakdown")
+                                sentiment_dist = sentiment_results['sentiment_distribution']
+                                for sentiment, count in sentiment_dist.items():
+                                    st.write(f"**{sentiment.title()}:** {count}")
+                        
+                        # Detailed analysis if available
+                        if 'detailed_analysis' in sentiment_results:
+                            st.subheader("Detailed Sentiment Analysis")
+                            detailed_df = pd.DataFrame(
+                                sentiment_results['detailed_analysis'],
+                                columns=['Sentiment', 'Score']
+                            )
+                            st.dataframe(detailed_df, use_container_width=True)
+                    else:
+                        st.error(f"Sentiment analysis failed: {sentiment_results['error']}")
+                tab_index += 1
+            
+            # Text Summary Tab
+            if 'text_summary' in st.session_state.analysis_results:
+                with tabs[tab_index]:
+                    summary_results = st.session_state.analysis_results['text_summary']
+                    if 'error' not in summary_results:
+                        st.subheader("Document Summary")
+                        st.write(summary_results.get('summary', 'No summary available'))
+                        
+                        # Summary statistics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Original Length", f"{summary_results.get('original_length', 0):,} chars")
+                        with col2:
+                            st.metric("Summary Length", f"{summary_results.get('summary_length', 0):,} chars")
+                        with col3:
+                            compression_ratio = summary_results.get('compression_ratio', 0)
+                            st.metric("Compression Ratio", f"{compression_ratio:.1%}")
+                        
+                        st.write(f"**Method Used:** {summary_results.get('method', 'unknown')}")
+                    else:
+                        st.error(f"Summarization failed: {summary_results['error']}")
+                tab_index += 1
+            
+            # Classification Tab
+            if 'classification' in st.session_state.analysis_results:
+                with tabs[tab_index]:
+                    classification_results = st.session_state.analysis_results['classification']
+                    if 'error' not in classification_results:
+                        predicted_category = classification_results.get('predicted_category', 'unknown')
+                        st.success(f"**Predicted Category:** {predicted_category.title()}")
+                        
+                        # Confidence scores
+                        if 'confidence_scores' in classification_results:
+                            st.subheader("Category Confidence Scores")
+                            conf_scores = classification_results['confidence_scores']
+                            
+                            # Show as dataframe too
+                            conf_df = pd.DataFrame(
+                                list(conf_scores.items()),
+                                columns=['Category', 'Confidence']
+                            ).sort_values('Confidence', ascending=False)
+                            st.dataframe(conf_df, use_container_width=True)
+                        
+                        st.write(f"**Method Used:** {classification_results.get('method', 'unknown')}")
+                    else:
+                        st.error(f"Classification failed: {classification_results['error']}")
+                tab_index += 1
+            
+            # OpenAI Analysis Tab
+            if 'openai_analysis' in st.session_state.analysis_results:
+                with tabs[tab_index]:
+                    openai_results = st.session_state.analysis_results['openai_analysis']
+                    if 'error' not in openai_results:
+                        st.subheader("AI-Powered Analysis")
+                        st.write(openai_results.get('analysis', 'No analysis available'))
+                        
+                        st.info(f"**Model Used:** {openai_results.get('model_used', 'unknown')}")
+                        st.info(f"**Analysis Type:** {openai_results.get('analysis_type', 'general')}")
+                    else:
+                        st.error(f"OpenAI analysis failed: {openai_results['error']}")
+        
+        # Generate visualizations if requested
+        if st.checkbox("Generate Additional Visualizations", key="gen_viz_cb"):
+            with st.spinner("Generating visualizations..."):
+                visualizations = analyzer.generate_visualizations(st.session_state.analysis_results)
+                
+                if visualizations:
+                    st.header("📊 Additional Visualizations")
+                    
+                    for viz_name, fig in visualizations.items():
+                        st.subheader(viz_name.replace('_', ' ').title())
+                        st.plotly_chart(fig, use_container_width=True, key=f"viz_{viz_name}")
+
+        # Export results
+        st.header("💾 Export Results")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            export_filename = st.text_input(
+                "Export filename (optional):",
+                placeholder="analysis_results.json",
+                key="export_filename"
+            )
+        
+        with col2:
+            if st.button("📥 Export to JSON", key="export_btn"):
+                try:
+                    exported_path = analyzer.export_results(
+                        st.session_state.analysis_results,
+                        filename=export_filename if export_filename else None
+                    )
+                    st.success(f"Results exported to: {exported_path}")
+                    
+                    # Provide download link
+                    with open(exported_path, 'r', encoding='utf-8') as f:
+                        st.download_button(
+                            label="📱 Download JSON File",
+                            data=f.read(),
+                            file_name=os.path.basename(exported_path),
+                            mime='application/json',
+                            key="download_json"
+                        )
+                except Exception as e:
+                    st.error(f"Export failed: {e}")
     
-    st.sidebar.header("🔧 Features")
-    st.sidebar.markdown("""
-    - **Basic Analysis**: Word count, readability
-    - **Sentiment Analysis**: Emotion detection
-    - **Summarization**: Auto-generated summaries
-    - **Classification**: Document categorization
-    - **AI Analysis**: OpenAI-powered insights
-    - **Visualizations**: Interactive charts
-    - **Export**: Save results as JSON
-    """)
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center'>
+            <p>Document Analysis with LLMs | Built with Streamlit, Transformers, and OpenAI</p>
+            <p>📄 Supports PDF, DOCX, and TXT files | 🤖 AI-powered analysis | 📊 Interactive visualizations</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def main():
+    """Main function to run the Streamlit app"""
+    try:
+        create_streamlit_app()
+    except Exception as e:
+        st.error(f"Application error: {e}")
+        st.info("Please refresh the page and try again.")
 
 
 if __name__ == "__main__":
-    # For running as Streamlit app
-    create_streamlit_app()
+    main()
