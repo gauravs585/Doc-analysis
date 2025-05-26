@@ -17,7 +17,6 @@ import re
 from datetime import datetime
 import requests
 import time
-
 # Download required NLTK data
 @st.cache_resource
 def download_nltk_data():
