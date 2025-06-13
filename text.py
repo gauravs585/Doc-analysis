@@ -17,6 +17,9 @@ import re
 from datetime import datetime
 import requests
 import time
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 # Download required NLTK data
 @st.cache_resource
 def download_nltk_data():
@@ -88,8 +91,9 @@ class DocumentAnalyzer:
                     # Fallback to a simpler model
                     _self.sentiment_analyzer = pipeline(
                         "sentiment-analysis",
-                        model="distilbert-base-uncased-finetuned-sst-2-english",
-                        device=device
+                        model="cardiffnlp/twitter-roberta-base-sentiment-latest",
+                        device=device,
+                        top_k=None  # Updated parameter instead of return_all_scores
                     )
                     models_status['sentiment'] = True
                 except Exception as e2:
