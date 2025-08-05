@@ -103,7 +103,7 @@ class DocumentAnalyzer:
             try:
                 _self.summarizer = pipeline(
                     "summarization",
-                    model="facebook/bart-large-cnn",
+                    model="sshleifer/distilbart-cnn-12-6",
                     device=device
                 )
                 models_status['summarizer'] = True
@@ -1012,4 +1012,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
