@@ -124,7 +124,7 @@ class DocumentAnalyzer:
             try:
                 _self.classifier = pipeline(
                     "zero-shot-classification",
-                    model="facebook/bart-large-mnli",
+                    model="typeform/distilbert-base-uncased-mnli",
                     device=device
                 )
                 models_status['classifier'] = True
@@ -1012,5 +1012,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
