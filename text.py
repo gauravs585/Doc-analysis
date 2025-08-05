@@ -80,7 +80,7 @@ class DocumentAnalyzer:
             try:
                 _self.sentiment_analyzer = pipeline(
                     "sentiment-analysis",
-                    model="cardiffnlp/twitter-roberta-base-sentiment-latest",
+                    model="distilbert-base-uncased-finetuned-sst-2-english",
                     device=device,
                     return_all_scores=True
                 )
@@ -1012,3 +1012,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
